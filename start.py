@@ -213,9 +213,15 @@ process_id = 0
 
 def predict1(path, model):
     global predict_water
-    dataframe = pd.read_csv(path)
-    water = dataframe.iloc[-60:, 4]
-    water = np.array(water)
+    dataframe = pd.read_csv(path, error_bad_lines=False, engine='python')
+    water = np.array(dataframe.iloc[:, 4])
+    if water.shape[0] < 60:
+        logging.info(time.strftime('%y-%m-%d %H:%M:%S') + '\nData water num is not enough, waiting for new round...'
+                     + '\n-------------- \n\n\n\n')
+        timer = threading.Timer(4, predict1, args=[path, model])
+        timer.start()
+        return
+    water = water[-60:]
     water_goal = dataframe.iloc[-1, 1]
     water_downsample = []
     for i in range(0, 60, 2):
@@ -223,8 +229,8 @@ def predict1(path, model):
         water_downsample.append(sample)
     water_downsample = np.array(water_downsample)
     water_run = water_downsample.reshape(1, 30)
-    predict_number = model.weight_predict(water_run)
-    logging.info(time.strftime('%y-%m-%d %H:%M:%S') + '\nPredicting finished.')
+    predict_number = model.predict(water_run)
+    logging.info(time.strftime('%y-%m-%d %H:%M:%S') + '\nPredicting water finished.')
     predict_water = np.append(predict_water, predict_number[0])
     window = predict_water[-30:]
     high = window[window > water_goal]
