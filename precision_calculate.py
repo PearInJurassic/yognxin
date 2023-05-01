@@ -1,5 +1,5 @@
 #!/home/panchenyu/anaconda3/bin/python3.9
-
+import numpy
 import torch
 import torch.nn as nn
 import pandas as pd
@@ -34,8 +34,12 @@ def exam_offline_predict(path, model):
     raw_data.sort_values('Logtime', inplace=True)
     weight_data = np.array(raw_data.loc[:, machine_weight_name])
 
+    abnormal_list = []
+    abnormal_index = []
+
     precision_list = []
     model_predict_ave = []
+    box_num_list = []
     true_ave = []
     aim_weight_line = []
     adjust_record = []
@@ -43,15 +47,16 @@ def exam_offline_predict(path, model):
     sum_of_abs_original = 0
 
     # 采前7500个数据作为测试
-    data_begin_idx = 12000
-    data_end_idx = 18080
+    data_begin_idx = 160
+    # data_end_idx = 290000
+    data_end_idx = 7660
 
     # ----------- 预测逻辑部分开始，可以不用理解 ------------#
     for i in range(data_begin_idx, data_end_idx):
         aim_weight_line.append(aim_weight)
         # 模拟到达数据
         print('No.', i, 'data has arrived')
-        raw_data = np.array(weight_data[data_begin_idx-history_window:i + future_window])
+        raw_data = np.array(weight_data[data_begin_idx - history_window:i + future_window])
         aim_weight = float(aim_weight)
         raw_data -= aim_weight
         offset_mean = raw_data.mean()
@@ -61,21 +66,30 @@ def exam_offline_predict(path, model):
 
         out_list = predict_test(model, input_set) * offset_std + offset_mean
 
-        out_list = np.concatenate((out_list, input_set[-history_window // 2:]))
+        out_list = np.concatenate((out_list, input_set[-history_window // 3:]))
         out_ave = out_list.mean()
+
+        # 检测异常
+        # abnormal_list.append(out_list)
+        # if abs(out_ave) > 2:
+        #     print(out_list)
+        #     abnormal_index.append(i-data_begin_idx)
+        #     print(abnormal_list)
+
         model_predict_ave.append(out_ave)
-        true_ave.append(raw_data[-(future_window + history_window // 2):].mean())
+        true_ave.append(raw_data[-(future_window + history_window // 3):].mean())
         # ----------- 预测逻辑部分结束 ------------#
 
         # out_ave:模型输出的[t-40,t+30]的均值
         # true_ave:实际情况下的[t-40,t+30]的均值
         # 准确率计算
         precision_list.append(1 - (abs(out_ave - true_ave[-1]) / (true_ave[-1] + aim_weight)))
-
+        # 装入箱图
+        box_num_list.append(out_ave - true_ave[-1])
         # 显示实际目标值的变化情况
-        print(aim_weight, out_ave + aim_weight, true_ave[-1] + aim_weight)
-        print(raw_data.mean())
-        print('set mean:', 1 - (abs(out_ave - true_ave[-1]) / (true_ave[-1] + aim_weight)))
+        # print(aim_weight, out_ave + aim_weight, true_ave[-1] + aim_weight)
+        # print(raw_data.mean())
+        # print('set mean:', 1 - (abs(out_ave - true_ave[-1]) / (true_ave[-1] + aim_weight)))
 
         # 计算预测和原始的绝对值偏差量
         sum_of_abs_predict += abs(out_ave)
@@ -90,14 +104,26 @@ def exam_offline_predict(path, model):
         else:
             adjust_record.append(0.0)
         # 模拟学习率使调整目标值梯度回归到实际均值
-        if abs(offset_mean) < 0.7 * 2.0:
+        if abs(offset_mean) < 0.7 * 4.0:
             aim_weight += offset_mean * 0.005
+
+    # abnormal_around = []
+    # for i in abnormal_index:
+    #     abnormal_around.extend(abnormal_list[i-5:i+5])
+    # print("abnormal index length:", len(abnormal_index))
+    # print(abnormal_index)
+    # print(abnormal_around)
+    # plt.figure(figsize=(25, 16))
+    # for i in range(1):
+    #     for j in range(10):
+    #         plt.subplot(2, 10, i*10+j+1)
+    #         plt.plot(range(len(abnormal_around[0])), abnormal_around[i*10+j], color='r', label='test')
+    # plt.show()
 
     # 绘图的数据范围可以自己调整，但不要超过前面的data_begin_idx和data_end_idx
     plt_data_begin_idx = max(80, data_begin_idx)
     plt_data_end_idx = max(7500, data_end_idx)
     plt.figure(figsize=(100, 6.0))
-
     ax1 = plt.subplot(2, 1, 1)
     ax1.plot(range(plt_data_end_idx - plt_data_begin_idx), model_predict_ave, 'b', label='predict')
     ax1.plot(range(plt_data_end_idx - plt_data_begin_idx), true_ave, 'g', label='true')
@@ -110,7 +136,10 @@ def exam_offline_predict(path, model):
 
     plt.subplot(2, 1, 2)
     plt.plot(range(plt_data_end_idx - plt_data_begin_idx), aim_weight_line)
+    plt.show()
 
+    plt.figure()
+    plt.hist(box_num_list, bins=30, histtype='stepfilled')
     plt.show()
 
     precision_list = np.array(precision_list)
@@ -124,10 +153,22 @@ def exam_offline_predict(path, model):
     model_predict_ave = np.array(model_predict_ave)
     print('Average offset loss:', (true_ave - model_predict_ave).mean())
 
+    percentile_line = [10, 30, 50, 80, 90]
+    box_num_list = numpy.absolute(box_num_list)
+    (hist_num, bin_edges) = np.histogram(box_num_list, bins=30)
+    print('Histogram num listed below:')
+    print('0,', bin_edges[0], ':', hist_num[0])
+    for i in range(1, 30):
+        print(str(bin_edges[i - 1]) + ',' + str(bin_edges[i]), ':', hist_num[i])
+    percentile = np.percentile(box_num_list, percentile_line)
+    print('Percentile listed below:')
+    for i in range(5):
+        print(percentile_line[i], percentile[i])
+
 
 # 历史窗口为80
-history_window = 80
-future_window = 30
+history_window = 160
+future_window = 60
 # 获取算力设备
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 machine_weight_name = 'Gage1_smooth'
@@ -138,7 +179,9 @@ if __name__ == '__main__':
     # aim_weight = 35.0
     aim_weight = 37.0
 
-    model_path = '11.22_lstm_76.0_0.3.pth'
+    # model_path = '11.22_lstm_76.0_0.3.pth'
+    # model_path = '230415_lstm_76.0_0.3.pth'
+    model_path = '230501_lstm_76.0+35.0_0.3.pth'
     # 载入模型
     model = torch.load(model_path, map_location=device)
     model.to(device)

@@ -32,7 +32,7 @@ def predict_test(model, first_set):
 def exam_offline_predict(path, model):
     global aim_weight
     # raw_data = pd.read_csv(path)
-    raw_data = pd.read_csv(path, names=col_names, header=1)
+    raw_data = pd.read_csv(path, names=weight_col_names, header=1)
     raw_data.sort_values('Logtime', inplace=True)
     weight_data = np.array(raw_data.loc[:, machine_weight_name])
 
@@ -69,8 +69,6 @@ def exam_offline_predict(path, model):
         sum_of_abs_predict += abs(out_ave)
         sum_of_abs_original += abs(raw_data[-(future_window + history_window // 2):].mean())
 
-        # TODO 需要一个观察周期
-
         # 数据实际0.3s来一个，可以设置一个周期进行
         if abs(out_ave) > 1.0:
             # 调整值通常以0.05为最小单位
@@ -105,6 +103,12 @@ def exam_offline_predict(path, model):
 def send_adjust_value_timer(trigger):
     sum = 0
     que_size = report_queue.qsize()
+
+    # TODO
+    # 有可能在队列达到一定时间内队列中的参数很少，对其中的成员进行平均可能是不准确的
+    # 比如第一个数据在0s产生，第二个数据在5min后产生，而其中只有两个+0.5的数据，平
+    # 均之后就会导致疑似点很少，且间隔很长，但还是造成了+0.5的结果
+
     # 检查缓存
     logging.info(time.strftime('%y-%m-%d %H:%M:%S')
                  + '\nProcess: ' + process_id
@@ -112,7 +116,10 @@ def send_adjust_value_timer(trigger):
 
     while not report_queue.empty():
         sum += report_queue.get()
-    ave = round(sum / que_size, 2)
+
+    ave = 0.0
+    if que_size > 50:
+        ave = round(sum / que_size, 2)
 
     # 向接口发送消息
     headers = {'Content-Type': 'application/json'}
@@ -132,7 +139,7 @@ def send_adjust_value_timer(trigger):
 def weight_predict(path, model):
     global aim_weight
 
-    raw_data = pd.read_csv(path, names=col_names, header=1)
+    raw_data = pd.read_csv(path, names=weight_col_names, header=1)
     weight_data = np.array(raw_data.loc[:, machine_weight_name])
 
     # 数据数量不足，轮询等待直到数据足够
@@ -161,7 +168,7 @@ def weight_predict(path, model):
 
     # 调整目标值梯度回归到实际均值
     # 使用一个调整上界防止数据的突变对整体均值产生影响
-    if abs(offset_mean) < 0.7 * 2.0:
+    if abs(offset_mean) < 0.7 * 4.0:
         aim_weight += offset_mean * 0.005
 
     # 预测均值和目前均值差距超过指定值则进行调整
@@ -169,19 +176,20 @@ def weight_predict(path, model):
     if abs(out_ave) > 1.0:
         # 调整值通常以0.05为最小单位
         suggest_adjust = int(-out_ave / 0.8) * 0.05
+        # 向接口发送消息
+        headers = {'Content-Type': 'application/json'}
+        data = {
+            "type": True if suggest_adjust > 0 else False,
+            "res": abs(suggest_adjust),
+            "predict": float(out_ave)
+        }
+        requests.post(url=url, data=json.dumps(data), headers=headers, timeout=10)
         # 尝试加入缓存
-        if not report_queue.full():
-            report_queue.put(suggest_adjust)
-        else:
-            send_adjust_value_timer(time='full')
+        # if not report_queue.full():
+        #     report_queue.put(suggest_adjust)
+        # else:
+        #     send_adjust_value_timer('full')
 
-        # data = {
-        #     "type": True if suggest_adjust > 0 else False,
-        #     "res": abs(suggest_adjust),
-        #     "predict": float(out_ave)
-        # }
-        # requests.post(url=url, data=json.dumps(data), headers=headers, timeout=10)
-        # logging.info(time.strftime('%y-%m-%d %H:%M:%S') + '\nSending request success.\n')
     timer = threading.Timer(suggest_time_space, weight_predict, args=[path, model])
     timer.start()
 
@@ -191,8 +199,8 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # 产生一个建议值的时间间隔（s）
 suggest_time_space = 2
 # 历史窗口为80
-history_window = 80
-future_window = 30
+history_window = 160
+future_window = 60
 # 采样间隔(s)
 sampling_time_space = 0.3
 # 人工调试时所需的轮训时间（s)
@@ -200,11 +208,12 @@ report_time = 5 * 60
 # 创建一个调整数据缓存队列
 report_queue = Queue(5000)
 aim_weight = 0.0
+aim_thick = 0.0
 # 接口地址
 url = "http://192.168.10.188:8099/business/winson-gage1-adjust-record/adjust"
 # 传入数据的列名
-col_names = ['Gage1Target', 'Gage2Target', 'Gage3Target', 'Gage1Raw', 'Gage2Raw', 'Gage3Raw', 'Gage1Smooth',
-             'Gage2Smooth', 'Gage3Smooth', 'Logtime']
+weight_col_names = ['Gage1Target', 'Gage2Target', 'Gage3Target', 'Gage1Raw', 'Gage2Raw', 'Gage3Raw', 'Gage1Smooth',
+                    'Gage2Smooth', 'Gage3Smooth', 'Logtime']
 # 需要的参数名（此处为平均克重）
 machine_weight_name = 'Gage1Smooth'
 predict_water = np.zeros(29)
@@ -250,7 +259,8 @@ if __name__ == '__main__':
     try:
         file_path = sys.argv[1]
         aim_weight = sys.argv[2]
-        model_path = '11.22_lstm_76.0_0.3.pth'
+        # model_path = '11.22_lstm_76.0_0.3.pth'
+        model_path = '230501_lstm_76.0+35.0_0.3.pth'
 
         # 配置日志文件
         logging.basicConfig(level='DEBUG', filename='./logs.txt', filemode='a+')
@@ -279,10 +289,11 @@ if __name__ == '__main__':
 
         # 触发接口发送的情景
         trigger = 'time'
+
         threading.Timer(suggest_time_space, weight_predict, args=[file_path, model]).start()
         threading.Timer(suggest_time_space, predict1, args=[file_path, model_water]).start()
         # 监控线程
-        threading.Timer(report_time, send_adjust_value_timer, args=[trigger]).start()
+        # threading.Timer(report_time, send_adjust_value_timer, args=[trigger]).start()
     except Exception:
         logging.error(time.strftime('%y-%m-%d %H:%M:%S') + traceback.format_exc() + '-------------- \n\n\n\n')
 
