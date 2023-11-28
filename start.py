@@ -44,7 +44,7 @@ def exam_offline_predict(path, model):
     sum_of_abs_original = 0
 
     print(weight_data)
-    for i in range(80, 7500):
+    for i in range(history_window, history_window + 7500):
         aim_weight_line.append(aim_weight)
         # 模拟到达数据
         print('No.', i, 'data has arrived')
@@ -77,9 +77,12 @@ def exam_offline_predict(path, model):
             report_queue.put(suggest_adjust)
         else:
             adjust_record.append(0.0)
+
         # 调整目标值梯度回归到实际均值
-        aim_weight += offset_mean * 0.005
-    #
+        # 使用一个调整上界防止数据的突变对整体均值产生影响
+        if abs(offset_mean) < 0.7 * 4.0:
+            aim_weight += offset_mean * 0.005
+
     # plt.figure(figsize=(100, 6.0))
     # ax1 = plt.subplot(2, 1, 1)
     # ax1.plot(range(7500 - 80), model_predict_ave, 'b')
@@ -173,7 +176,7 @@ def weight_predict(path, model):
 
     # 预测均值和目前均值差距超过指定值则进行调整
     headers = {'Content-Type': 'application/json'}
-    if abs(out_ave) > 1.0:
+    if abs(out_ave) > 0.8:
         # 调整值通常以0.05为最小单位
         suggest_adjust = int(-out_ave / 0.8) * 0.05
         # 向接口发送消息
@@ -198,7 +201,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # 产生一个建议值的时间间隔（s）
 suggest_time_space = 2
-# 历史窗口为80
+# 历史窗口和预测窗口大小
 history_window = 160
 future_window = 60
 # 采样间隔(s)
@@ -297,9 +300,9 @@ if __name__ == '__main__':
     except Exception:
         logging.error(time.strftime('%y-%m-%d %H:%M:%S') + traceback.format_exc() + '-------------- \n\n\n\n')
 
-    # file_path = sys.argv[1]
-    # aim_weight = sys.argv[2]
-    # model_path = '11.22_lstm_76.0_0.3.pth'
+    # file_path = '/Users/chenyupan/Downloads/0609/csv_1686295201685'
+    # aim_weight = 35.0
+    # model_path = '230501_lstm_76.0+35.0_0.3.pth'
     # model = torch.load(model_path, map_location=device)
     # model.to(device)
     #
