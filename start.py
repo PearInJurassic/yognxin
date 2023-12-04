@@ -1,18 +1,17 @@
-import torch
-import pandas as pd
-import numpy as np
-import threading
-import sys
-import requests
-import logging
-import time
 import json
-import traceback
-import matplotlib.pyplot as plt
+import logging
 import os
-import joblib
+import sys
+import threading
+import time
+import traceback
 from queue import Queue
-import psutil
+
+import joblib
+import numpy as np
+import pandas as pd
+import requests
+import torch
 
 
 # 长时间预测
@@ -44,7 +43,7 @@ def exam_offline_predict(path, model):
     sum_of_abs_original = 0
 
     print(weight_data)
-    for i in range(history_window, history_window + 7500):
+    for i in range(80, 7500):
         aim_weight_line.append(aim_weight)
         # 模拟到达数据
         print('No.', i, 'data has arrived')
@@ -77,12 +76,9 @@ def exam_offline_predict(path, model):
             report_queue.put(suggest_adjust)
         else:
             adjust_record.append(0.0)
-
         # 调整目标值梯度回归到实际均值
-        # 使用一个调整上界防止数据的突变对整体均值产生影响
-        if abs(offset_mean) < 0.7 * 4.0:
-            aim_weight += offset_mean * 0.005
-
+        aim_weight += offset_mean * 0.005
+    #
     # plt.figure(figsize=(100, 6.0))
     # ax1 = plt.subplot(2, 1, 1)
     # ax1.plot(range(7500 - 80), model_predict_ave, 'b')
@@ -101,42 +97,6 @@ def exam_offline_predict(path, model):
     # true_ave = np.array(true_ave)
     # model_predict_ave = np.array(model_predict_ave)
     # print('Average offset loss:', (true_ave - model_predict_ave).mean())
-
-
-def send_adjust_value_timer(trigger):
-    sum = 0
-    que_size = report_queue.qsize()
-
-    # TODO
-    # 有可能在队列达到一定时间内队列中的参数很少，对其中的成员进行平均可能是不准确的
-    # 比如第一个数据在0s产生，第二个数据在5min后产生，而其中只有两个+0.5的数据，平
-    # 均之后就会导致疑似点很少，且间隔很长，但还是造成了+0.5的结果
-
-    # 检查缓存
-    logging.info(time.strftime('%y-%m-%d %H:%M:%S')
-                 + '\nProcess: ' + process_id
-                 + ',Checking report cache.\n')
-
-    while not report_queue.empty():
-        sum += report_queue.get()
-
-    ave = 0.0
-    if que_size > 50:
-        ave = round(sum / que_size, 2)
-
-    # 向接口发送消息
-    headers = {'Content-Type': 'application/json'}
-    data = {
-        "type": True if ave > 0 else False,
-        "res": abs(ave),
-        "predict": float(0.00)
-    }
-    requests.post(url=url, data=json.dumps(data), headers=headers, timeout=10)
-
-    logging.info(time.strftime('%y-%m-%d %H:%M:%S') + '\nSending request success.\n')
-
-    if trigger == 'time':
-        threading.Timer(report_time, send_adjust_value_timer, args=[trigger]).start()
 
 
 def weight_predict(path, model):
@@ -175,7 +135,6 @@ def weight_predict(path, model):
         aim_weight += offset_mean * 0.005
 
     # 预测均值和目前均值差距超过指定值则进行调整
-    headers = {'Content-Type': 'application/json'}
     if abs(out_ave) > 0.8:
         # 调整值通常以0.05为最小单位
         suggest_adjust = int(-out_ave / 0.8) * 0.05
@@ -201,7 +160,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # 产生一个建议值的时间间隔（s）
 suggest_time_space = 2
-# 历史窗口和预测窗口大小
+# 历史窗口为80
 history_window = 160
 future_window = 60
 # 采样间隔(s)
@@ -213,7 +172,7 @@ report_queue = Queue(5000)
 aim_weight = 0.0
 aim_thick = 0.0
 # 接口地址
-url = "http://192.168.10.188:8099/business/winson-gage1-adjust-record/adjust"
+url = "http://192.168.10.188:5142/business/winson-gage1-adjust-record/adjust"
 # 传入数据的列名
 weight_col_names = ['Gage1Target', 'Gage2Target', 'Gage3Target', 'Gage1Raw', 'Gage2Raw', 'Gage3Raw', 'Gage1Smooth',
                     'Gage2Smooth', 'Gage3Smooth', 'Logtime']
@@ -221,20 +180,31 @@ weight_col_names = ['Gage1Target', 'Gage2Target', 'Gage3Target', 'Gage1Raw', 'Ga
 machine_weight_name = 'Gage1Smooth'
 predict_water = np.zeros(29)
 process_id = 0
+oowc_high = 0
+oowc_low = 0
 
 
 def predict1(path, model):
     global predict_water
+    global oowc_high
+    global oowc_low
     dataframe = pd.read_csv(path, error_bad_lines=False, engine='python')
     water = np.array(dataframe.iloc[:, 4])
+    # 数据数量不足，轮询等待直到数据足够
     if water.shape[0] < 60:
         logging.info(time.strftime('%y-%m-%d %H:%M:%S') + '\nData water num is not enough, waiting for new round...'
                      + '\n-------------- \n\n\n\n')
         timer = threading.Timer(4, predict1, args=[path, model])
         timer.start()
         return
+    # 读取水分值和上下阈值
     water = water[-60:]
-    water_goal = dataframe.iloc[-1, 1]
+    water_goal_high = dataframe.iloc[-1, 1]
+    if water_goal_high < 10.0:
+        water_goal_low = water_goal_high - 1.5
+    else:
+        water_goal_low = water_goal_high - 3
+    # 下采样预测
     water_downsample = []
     for i in range(0, 60, 2):
         sample = min(water[i], water[i + 1])
@@ -243,17 +213,42 @@ def predict1(path, model):
     water_run = water_downsample.reshape(1, 30)
     predict_number = model.predict(water_run)
     logging.info(time.strftime('%y-%m-%d %H:%M:%S') + '\nPredicting water finished.')
+    # 判断上超下超
     predict_water = np.append(predict_water, predict_number[0])
     window = predict_water[-30:]
-    high = window[window > water_goal]
-    ratio = len(high) / 30
-    headers = {'Content-Type': 'application/json'}
-    data = {
-        "res": ratio
-    }
-    requests.post(url="http://192.168.10.188:8099/business/winson-gage2-adjust-record/adjust", data=json.dumps(data),
-                  headers=headers, timeout=10)
-    logging.info(time.strftime('%y-%m-%d %H:%M:%S') + '\nSending request success.')
+    high = window[window > water_goal_high]
+    low = window[window < water_goal_low]
+    ratio_high = len(high) / 30
+    ratio_low = len(low) / 30
+    # 上超
+    if ratio_high > 0.1:
+        oowc_high += 1
+        if oowc_high > 30:
+            headers = {'Content-Type': 'application/json'}
+            data = {
+                "res": 1
+            }
+            requests.post(url="http://192.168.10.188:5142/business/winson-gage2-adjust-record/adjust",
+                          data=json.dumps(data),
+                          headers=headers, timeout=10)
+            logging.info(time.strftime('%y-%m-%d %H:%M:%S') + '\nSending request success.')
+    else:
+        oowc_high = 0
+    # 下超
+    if ratio_low > 0.1:
+        oowc_low += 1
+        if oowc_low > 30:
+            headers = {'Content-Type': 'application/json'}
+            data = {
+                "res": -1
+            }
+            requests.post(url="http://192.168.10.188:5142/business/winson-gage2-adjust-record/adjust",
+                          data=json.dumps(data),
+                          headers=headers, timeout=10)
+            logging.info(time.strftime('%y-%m-%d %H:%M:%S') + '\nSending request success.')
+    else:
+        oowc_low = 0
+    # 递归
     timer = threading.Timer(suggest_time_space, predict1, args=[path, model])
     timer.start()
 
@@ -267,12 +262,6 @@ if __name__ == '__main__':
 
         # 配置日志文件
         logging.basicConfig(level='DEBUG', filename='./logs.txt', filemode='a+')
-
-        # 测试用
-        # print('start.py 运行成功')
-        # print('file_path', file_path)
-        # print('aim_weight', aim_weight)
-        # time.sleep(300)
 
         if not os.path.exists(file_path):
             logging.info(time.strftime('%y-%m-%d %H:%M:%S') +
@@ -300,9 +289,9 @@ if __name__ == '__main__':
     except Exception:
         logging.error(time.strftime('%y-%m-%d %H:%M:%S') + traceback.format_exc() + '-------------- \n\n\n\n')
 
-    # file_path = '/Users/chenyupan/Downloads/0609/csv_1686295201685'
-    # aim_weight = 35.0
-    # model_path = '230501_lstm_76.0+35.0_0.3.pth'
+    # file_path = sys.argv[1]
+    # aim_weight = sys.argv[2]
+    # model_path = '11.22_lstm_76.0_0.3.pth'
     # model = torch.load(model_path, map_location=device)
     # model.to(device)
     #
